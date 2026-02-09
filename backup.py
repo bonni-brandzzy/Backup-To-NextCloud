@@ -4,7 +4,7 @@ import os
 import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -208,25 +208,95 @@ def get_backup_files(project=None):
     return out
 
 
+def _gfs_to_keep(files_with_dates, now_utc, son_days, father_weeks, grandfather_months):
+    """
+    GFS retention: which backup names to keep.
+    - Son: last son_days days, one most-recent backup per day.
+    - Father: next father_weeks weeks, one most-recent backup per week.
+    - Grandfather: next grandfather_months months, one most-recent backup per month.
+    Returns set of backup names to keep.
+    """
+    to_keep = set()
+    cutoff_son = now_utc - timedelta(days=son_days)
+    cutoff_father = now_utc - timedelta(weeks=father_weeks)
+    cutoff_grandfather = now_utc - timedelta(days=grandfather_months * 30)
+
+    by_day = {}
+    by_week = {}
+    by_month = {}
+
+    for item, mod_utc in files_with_dates:
+        name = item.get("name")
+        if not name or mod_utc is None:
+            continue
+        if mod_utc.tzinfo is None:
+            mod_utc = mod_utc.replace(tzinfo=timezone.utc)
+        else:
+            mod_utc = mod_utc.astimezone(timezone.utc)
+
+        if mod_utc >= cutoff_son:
+            key = mod_utc.date()
+            if key not in by_day or mod_utc > by_day[key][1]:
+                by_day[key] = (item, mod_utc)
+        elif mod_utc >= cutoff_father:
+            key = (mod_utc.year, mod_utc.isocalendar()[1])
+            if key not in by_week or mod_utc > by_week[key][1]:
+                by_week[key] = (item, mod_utc)
+        elif mod_utc >= cutoff_grandfather:
+            key = (mod_utc.year, mod_utc.month)
+            if key not in by_month or mod_utc > by_month[key][1]:
+                by_month[key] = (item, mod_utc)
+
+    for _, (item, _) in by_day.items():
+        to_keep.add(item["name"])
+    for _, (item, _) in by_week.items():
+        to_keep.add(item["name"])
+    for _, (item, _) in by_month.items():
+        to_keep.add(item["name"])
+
+    return to_keep
+
+
 def delete_from_server():
     cfg = load_config()
-    backup = cfg.get("backup") or {}
-    retention_days = int(backup.get("retention_days") or 7)
+    backup_cfg = cfg.get("backup") or {}
+    gfs = backup_cfg.get("gfs")
+
     for project in _get_projects():
         url, remote_dir, auth = _nextcloud_conn(project)
         if not url:
             continue
         files = get_backup_files(project)
         now = datetime.now(timezone.utc)
-        for item in files:
-            mod = item.get("last_modified")
-            if mod is None:
-                continue
-            mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
-            if (now - mod_utc).days >= retention_days:
-                conn = http.client.HTTPSConnection(url)
-                conn.request("DELETE", remote_dir + "/" + quote(item["name"], safe=""), "", {"Authorization": f"Basic {auth}"})
-                conn.getresponse().read()
+
+        if gfs and isinstance(gfs, dict):
+            son_days = int(gfs.get("son_days") or 7)
+            father_weeks = int(gfs.get("father_weeks") or 4)
+            grandfather_months = int(gfs.get("grandfather_months") or 12)
+            files_with_dates = []
+            for item in files:
+                mod = item.get("last_modified")
+                if mod is None:
+                    continue
+                mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
+                files_with_dates.append((item, mod_utc))
+            to_keep = _gfs_to_keep(files_with_dates, now, son_days, father_weeks, grandfather_months)
+            for item in files:
+                if item.get("name") not in to_keep:
+                    conn = http.client.HTTPSConnection(url)
+                    conn.request("DELETE", remote_dir + "/" + quote(item["name"], safe=""), "", {"Authorization": f"Basic {auth}"})
+                    conn.getresponse().read()
+        else:
+            retention_days = int(backup_cfg.get("retention_days") or 7)
+            for item in files:
+                mod = item.get("last_modified")
+                if mod is None:
+                    continue
+                mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
+                if (now - mod_utc).days >= retention_days:
+                    conn = http.client.HTTPSConnection(url)
+                    conn.request("DELETE", remote_dir + "/" + quote(item["name"], safe=""), "", {"Authorization": f"Basic {auth}"})
+                    conn.getresponse().read()
 
 
 def main():

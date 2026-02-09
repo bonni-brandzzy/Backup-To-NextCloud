@@ -6,9 +6,14 @@
   },
   "backup": {
     "retention_days": 7,
-    "temp_dir": "/tmp/backup_temp"
+    "temp_dir": "/tmp/backup_temp",
+    "gfs": {
+      "son_days": 7,
+      "father_weeks": 4,
+      "grandfather_months": 12
+    }
   },
-  "projects": [    
+  "projects": [
     {
       "name": "othersite",
       "database_host": "localhost",
@@ -19,7 +24,7 @@
       "files": [
         "/var/www/othersite/storage/logs/",
         "/var/www/othersite/public/uploads/"
-      ],      
+      ],
       "nextcloud_backup_base_dir": "Backups",
       "nextcloud_backup_dir": "othersite"
     }
