@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
@@ -174,6 +175,23 @@ def delete(zip_path):
         return False
 
 
+def _date_from_backup_filename(name):
+    """
+    Parse date from backup filename like backup_othersite_20250209_120000.zip.
+    Returns datetime in UTC, or None if the pattern doesn't match.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    m = re.match(r"backup_.+_(\d{8})_(\d{6})\.zip$", name, re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 def get_backup_files(project=None):
     url, remote_dir, auth = _nextcloud_conn(project)
     if not url:
@@ -196,14 +214,16 @@ def get_backup_files(project=None):
         if href == remote_dir.rstrip("/") or href.endswith("/"):
             continue
         name = href.split("/")[-1]
-        mod_el = prop.find("d:getlastmodified", ns)
-        if mod_el is not None and mod_el.text:
-            try:
-                mod_dt = parsedate_to_datetime(mod_el.text)
-            except Exception:
+        mod_dt = _date_from_backup_filename(name)
+        if mod_dt is None:
+            mod_el = prop.find("d:getlastmodified", ns)
+            if mod_el is not None and mod_el.text:
+                try:
+                    mod_dt = parsedate_to_datetime(mod_el.text)
+                except Exception:
+                    mod_dt = None
+            else:
                 mod_dt = None
-        else:
-            mod_dt = None
         out.append({"name": name, "last_modified": mod_dt})
     return out
 
@@ -277,8 +297,9 @@ def delete_from_server():
             for item in files:
                 mod = item.get("last_modified")
                 if mod is None:
-                    continue
-                mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
+                    mod_utc = now  # unknown date → treat as now so we keep it
+                else:
+                    mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
                 files_with_dates.append((item, mod_utc))
             to_keep = _gfs_to_keep(files_with_dates, now, son_days, father_weeks, grandfather_months)
             for item in files:
