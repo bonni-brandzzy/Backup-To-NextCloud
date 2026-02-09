@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import http.client
 
 CONFIG_FILE = "config.json"
@@ -210,10 +210,13 @@ def get_backup_files(project=None):
         prop = resp.find(".//d:prop", ns)
         if href_el is None or prop is None or href_el.text is None:
             continue
-        href = href_el.text.rstrip("/")
-        if href == remote_dir.rstrip("/") or href.endswith("/"):
+        href_raw = (href_el.text or "").strip()
+        if href_raw.endswith("/"):
             continue
-        name = href.split("/")[-1]
+        href = href_raw.rstrip("/")
+        if href == remote_dir.rstrip("/"):
+            continue
+        name = unquote(href.split("/")[-1])
         mod_dt = _date_from_backup_filename(name)
         if mod_dt is None:
             mod_el = prop.find("d:getlastmodified", ns)
@@ -234,9 +237,11 @@ def _gfs_to_keep(files_with_dates, now_utc, son_days, father_weeks, grandfather_
     - Son: last son_days days, one most-recent backup per day.
     - Father: next father_weeks weeks, one most-recent backup per week.
     - Grandfather: next grandfather_months months, one most-recent backup per month.
+    - Grace: backups from the last hour are always kept (avoids deleting the one just uploaded).
     Returns set of backup names to keep.
     """
     to_keep = set()
+    grace = now_utc - timedelta(hours=1)
     cutoff_son = now_utc - timedelta(days=son_days)
     cutoff_father = now_utc - timedelta(weeks=father_weeks)
     cutoff_grandfather = now_utc - timedelta(days=grandfather_months * 30)
@@ -254,6 +259,9 @@ def _gfs_to_keep(files_with_dates, now_utc, son_days, father_weeks, grandfather_
         else:
             mod_utc = mod_utc.astimezone(timezone.utc)
 
+        if mod_utc >= grace:
+            to_keep.add(name)
+            continue
         if mod_utc >= cutoff_son:
             key = mod_utc.date()
             if key not in by_day or mod_utc > by_day[key][1]:
