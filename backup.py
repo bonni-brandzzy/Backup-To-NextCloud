@@ -82,9 +82,10 @@ def _nextcloud_conn(project=None):
     url = (nc.get("url") or "").replace("https://", "").replace("http://", "").strip("/")
     user = (nc.get("user") or "").strip()
     password = (nc.get("password") or "").strip()
+    # "/" or empty for either is allowed; strip("/") normalizes and filter(None, ...) drops empty segments
     path1 = (project.get("nextcloud_backup_base_dir") or "").strip("/") if project else ""
     path2 = (project.get("nextcloud_backup_dir") or "").strip("/") if project else ""
-    if not all([url, user, path1]):
+    if not url or not user:
         return None, None, None
     parts = filter(None, [user.strip("/"), path1, path2])
     remote_dir = "/remote.php/dav/files/" + "/".join(quote(p, safe="") for p in parts)
