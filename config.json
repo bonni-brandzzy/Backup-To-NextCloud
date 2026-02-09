@@ -1,0 +1,27 @@
+{
+  "nextcloud": {
+    "url": "https://your-nextcloud.example.com",
+    "user": "your_username",
+    "password": "your_password"
+  },
+  "backup": {
+    "retention_days": 7,
+    "temp_dir": "/tmp/backup_temp"
+  },
+  "projects": [    
+    {
+      "name": "othersite",
+      "database_host": "localhost",
+      "database_port": "3306",
+      "database_name": "othersite_db",
+      "database_username": "othersite_user",
+      "database_password": "your_db_password",
+      "files": [
+        "/var/www/othersite/storage/logs/",
+        "/var/www/othersite/public/uploads/"
+      ],      
+      "nextcloud_backup_base_dir": "Backups",
+      "nextcloud_backup_dir": "othersite"
+    }
+  ]
+}

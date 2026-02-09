@@ -1,6 +1,6 @@
 import base64
+import json
 import os
-import shutil
 import subprocess
 import zipfile
 import xml.etree.ElementTree as ET
@@ -10,59 +10,102 @@ from pathlib import Path
 from urllib.parse import quote
 import http.client
 
-files = [    
-    "/var/www/larapush/storage/logs/server.json",
-    "/var/www/larapush/storage/logs/it/",
-    "/var/www/larapush/public/uploads/",
-    "/var/www/larapush/scripts/format.js",
-]
-envfile = ".env"
-
-RetentionDays = 7
-
-def load_env(path):
-    env = {}
-    if not os.path.isfile(path):
-        return env
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
+CONFIG_FILE = "config.json"
+_config = None
 
 
 def _project_root():
-    # backup.py lives at project root 
     return Path(__file__).resolve().parent
 
 
-def _nextcloud_conn(env):
+def load_config():
+    global _config
+    if _config is not None:
+        return _config
     base = _project_root()
-    env = env or load_env(base / envfile)
-    url = (env.get("NEXTCLOUD_URL") or "").replace("https://", "").replace("http://", "").strip("/")
-    user = env.get("NEXTCLOUD_USER", "")
-    path1 = env.get("NEXTCLOUD_BACKUP_BASE_DIR", "").strip("/")
-    path2 = (env.get("NEXTCLOUD_BACKUP_DIR") or "").strip("/")
+    path = base / CONFIG_FILE
+    _config = {}
+    if not path.is_file():
+        return _config
+    with open(path, encoding="utf-8") as f:
+        _config = json.load(f)
+    return _config
+
+
+def _get_projects():
+    """Return list of project dicts from config['projects']."""
+    cfg = load_config()
+    projects = cfg.get("projects") or []
+    return [p for p in projects if isinstance(p, dict) and p.get("name")]
+
+
+def _get_project_files(project):
+    """Paths to include for this project (list from project['files'])."""
+    files = project.get("files")
+    if isinstance(files, list):
+        return [str(p).strip() for p in files if p and str(p).strip()]
+    return []
+
+
+def _get_project_database(project):
+    """Database config for this project as dict or None if incomplete."""
+    if not project:
+        return None
+    host = (project.get("database_host") or "").strip()
+    database = (project.get("database_name") or "").strip()
+    username = (project.get("database_username") or "").strip()
+    if not host or not database or not username:
+        return None
+    return {
+        "host": host,
+        "port": str(project.get("database_port") or "3306").strip(),
+        "database": database,
+        "username": username,
+        "password": (project.get("database_password") or "").strip(),
+    }
+
+
+def _get_temp_dir():
+    """Directory for zip and temp files; created if needed, resolved against project root if relative."""
+    cfg = load_config()
+    backup = cfg.get("backup") or {}
+    temp = (backup.get("temp_dir") or "storage/backup_temp").strip()
+    base = _project_root()
+    p = Path(temp)
+    return p if p.is_absolute() else base / p
+
+
+def _nextcloud_conn(project=None):
+    """Return (url, remote_dir, auth). Uses project's nextcloud_backup_base_dir/nextcloud_backup_dir when given."""
+    cfg = load_config()
+    nc = cfg.get("nextcloud") or {}
+    url = (nc.get("url") or "").replace("https://", "").replace("http://", "").strip("/")
+    user = (nc.get("user") or "").strip()
+    password = (nc.get("password") or "").strip()
+    path1 = (project.get("nextcloud_backup_base_dir") or "").strip("/") if project else ""
+    path2 = (project.get("nextcloud_backup_dir") or "").strip("/") if project else ""
     if not all([url, user, path1]):
         return None, None, None
     parts = filter(None, [user.strip("/"), path1, path2])
     remote_dir = "/remote.php/dav/files/" + "/".join(quote(p, safe="") for p in parts)
-    auth = base64.b64encode(f"{user}:{env.get('NEXTCLOUD_PASS', '')}".encode()).decode()
+    auth = base64.b64encode(f"{user}:{password}".encode()).decode()
     return url, remote_dir, auth
 
-def backup():
+
+def backup_project(project):
+    """Create one zip for this project: its files + its database dump. Returns path to the zip."""
+    project_id = project.get("name", "unknown")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base = _project_root()
-    work = base / "storage" / "backup_temp"
+    work = _get_temp_dir()
     work.mkdir(parents=True, exist_ok=True)
-    zip_path = base / "storage" / f"backup_{ts}.zip"
+    zip_path = work / f"backup_{project_id}_{ts}.zip"
+    files = _get_project_files(project)
 
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in files:
-                full = base / p
+                full = Path(p) if Path(p).is_absolute() else base / p
                 if not full.exists():
                     continue
                 if full.is_file():
@@ -71,16 +114,21 @@ def backup():
                     for root, _, filenames in os.walk(full):
                         for name in filenames:
                             fp = Path(root) / name
-                            arc = fp.relative_to(base)
-                            zf.write(fp, str(arc))
+                            try:
+                                arc = fp.relative_to(full)
+                            except ValueError:
+                                arc = fp.name
+                            zf.write(fp, f"{full.name}/{arc}")
 
-            env = load_env(base / envfile)
-            db_keys = ("DB_HOST", "DB_PORT", "DB_DATABASE", "DB_USERNAME", "DB_PASSWORD")
-            if all(k in env for k in db_keys):
-                sql_path = work / "dump.sql"
-                cmd = ["mysqldump", "-h", env["DB_HOST"], "-P", env["DB_PORT"], "-u", env["DB_USERNAME"], env["DB_DATABASE"]]
-                if env["DB_PASSWORD"]:
-                    cmd.insert(-1, f"--password={env['DB_PASSWORD']}")
+            db = _get_project_database(project)
+            if db:
+                sql_path = work / f"dump_{project_id}.sql"
+                cmd = [
+                    "mysqldump", "-h", db["host"], "-P", db["port"],
+                    "-u", db["username"], db["database"]
+                ]
+                if db.get("password"):
+                    cmd.insert(-1, f"--password={db['password']}")
                 try:
                     with open(sql_path, "w") as out:
                         subprocess.run(cmd, stdout=out, stderr=subprocess.DEVNULL, check=True, cwd=base)
@@ -89,15 +137,17 @@ def backup():
                     pass
     finally:
         if work.exists():
-            shutil.rmtree(work, ignore_errors=True)
+            for f in work.iterdir():
+                if f != zip_path and f.is_file():
+                    f.unlink(missing_ok=True)
 
     return str(zip_path)
 
 
-def upload(zip_path):
-    url, remote_dir, auth = _nextcloud_conn(None)
+def upload(zip_path, project=None):
+    url, remote_dir, auth = _nextcloud_conn(project)
     if not url:
-        return False, "Missing NEXTCLOUD_* env keys"
+        return False, "Missing nextcloud settings in config.json"
     remote_path = remote_dir + "/" + quote(Path(zip_path).name, safe="")
     with open(zip_path, "rb") as f:
         body = f.read()
@@ -123,10 +173,8 @@ def delete(zip_path):
         return False
 
 
-def get_backup_files():
-    base = _project_root()
-    env = load_env(base / envfile)
-    url, remote_dir, auth = _nextcloud_conn(env)
+def get_backup_files(project=None):
+    url, remote_dir, auth = _nextcloud_conn(project)
     if not url:
         return []
     conn = http.client.HTTPSConnection(url)
@@ -160,32 +208,42 @@ def get_backup_files():
 
 
 def delete_from_server():
-    base = _project_root()
-    env = load_env(base / envfile)
-    url, remote_dir, auth = _nextcloud_conn(env)
-    if not url:
-        return
-    files = get_backup_files()
-    now = datetime.now(timezone.utc)
-    for item in files:
-        mod = item.get("last_modified")
-        if mod is None:
+    cfg = load_config()
+    backup = cfg.get("backup") or {}
+    retention_days = int(backup.get("retention_days") or 7)
+    for project in _get_projects():
+        url, remote_dir, auth = _nextcloud_conn(project)
+        if not url:
             continue
-        mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
-        if (now - mod_utc).days >= RetentionDays:
-            conn = http.client.HTTPSConnection(url)
-            conn.request("DELETE", remote_dir + "/" + quote(item["name"], safe=""), "", {"Authorization": f"Basic {auth}"})
-            conn.getresponse().read()
+        files = get_backup_files(project)
+        now = datetime.now(timezone.utc)
+        for item in files:
+            mod = item.get("last_modified")
+            if mod is None:
+                continue
+            mod_utc = mod.astimezone(timezone.utc) if mod.tzinfo else mod.replace(tzinfo=timezone.utc)
+            if (now - mod_utc).days >= retention_days:
+                conn = http.client.HTTPSConnection(url)
+                conn.request("DELETE", remote_dir + "/" + quote(item["name"], safe=""), "", {"Authorization": f"Basic {auth}"})
+                conn.getresponse().read()
 
 
 def main():
-    zip_path = backup()
-    success, message = upload(zip_path)    
-    if success:
-        print(message)
-    else:
-        print(message)
-    delete(zip_path)
+    projects = _get_projects()
+    if not projects:
+        print("No projects found in config.json. Add at least one entry to the 'projects' array.")
+        return
+
+    for project in projects:
+        project_id = project.get("name", "unknown")
+        print(f"Backing up project: {project_id}")
+        zip_path = backup_project(project)
+        success, message = upload(zip_path, project)
+        if success:
+            print(f"  {message}")
+        else:
+            print(f"  {message}")
+        delete(zip_path)
 
     print("Backup completed successfully")
     delete_from_server()
