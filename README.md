@@ -25,10 +25,10 @@ A Python script that backs up multiple projects (files + MySQL databases) to Nex
    cd Backup-to-NextCloud
    ```
 
-2. Copy and edit the config:
+2. Edit the config:
    ```bash
-   cp config.json config.json.my
-   # Edit config.json.my (or rename to config.json)
+   nano config.json 
+   
    ```
 
 3. Run:
