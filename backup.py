@@ -338,14 +338,22 @@ def main():
         project_id = project.get("name", "unknown")
         print(f"Backing up project: {project_id}")
         zip_path = backup_project(project)
-        success, message = upload(zip_path, project)
+        success, message = False, ""
+        for attempt in range(1, 5):
+            success, message = upload(zip_path, project)
+            if success:
+                break
+            if attempt < 4:
+                print(f"  Upload failed (attempt {attempt}/4): {message}. Retrying...")
         if success:
             print(f"  {message}")
+            print("Backup completed successfully")
         else:
             print(f"  {message}")
+            print("Backup failed")
         delete(zip_path)
 
-    print("Backup completed successfully")
+    
     delete_from_server()
 
 if __name__ == "__main__":
