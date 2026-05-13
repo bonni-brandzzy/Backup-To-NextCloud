@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
@@ -344,7 +345,8 @@ def main():
             if success:
                 break
             if attempt < 4:
-                print(f"  Upload failed (attempt {attempt}/4): {message}. Retrying...")
+                print(f"  Upload failed (attempt {attempt}/4): {message}. Retrying in 60 seconds...")
+                time.sleep(60)
         if success:
             print(f"  {message}")
             print("Backup completed successfully")
