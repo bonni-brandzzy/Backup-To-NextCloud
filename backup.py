@@ -148,24 +148,46 @@ def backup_project(project):
 
 
 def upload(zip_path, project=None):
-    url, remote_dir, auth = _nextcloud_conn(project)
-    if not url:
-        return False, "Missing nextcloud settings in config.json"
-    remote_path = remote_dir + "/" + quote(Path(zip_path).name, safe="")
-    with open(zip_path, "rb") as f:
-        body = f.read()
-    conn = http.client.HTTPSConnection(url)
-    conn.request("PUT", remote_path, body, {"Content-Type": "application/octet-stream", "Authorization": f"Basic {auth}"})
-    res = conn.getresponse()
-    data = res.read()
-    code = res.status
-    if code in (201, 204):
-        return True, f"Upload OK ({code})"
-    if code == 409:
-        return False, "Parent folder does not exist (409)"
-    if code == 403:
-        return False, "Permission denied (403)"
-    return False, f"HTTP {code}: {data.decode('utf-8', errors='replace')}"
+    try:
+        url, remote_dir, auth = _nextcloud_conn(project)
+
+        if not url:
+            return False, "Missing nextcloud settings in config.json"
+
+        remote_path = remote_dir + "/" + quote(Path(zip_path).name, safe="")
+
+        with open(zip_path, "rb") as f:
+            body = f.read()
+
+        conn = http.client.HTTPSConnection(url, timeout=3600)
+
+        conn.request(
+            "PUT",
+            remote_path,
+            body,
+            {
+                "Content-Type": "application/octet-stream",
+                "Authorization": f"Basic {auth}"
+            }
+        )
+
+        res = conn.getresponse()
+        data = res.read()
+        code = res.status
+
+        if code in (201, 204):
+            return True, f"Upload OK ({code})"
+
+        if code == 409:
+            return False, "Parent folder does not exist (409)"
+
+        if code == 403:
+            return False, "Permission denied (403)"
+
+        return False, f"HTTP {code}: {data.decode('utf-8', errors='replace')}"
+
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)}"
 
 
 def delete(zip_path):
